@@ -44,12 +44,15 @@ TIKTOK_RE = re.compile(
 INSTAGRAM_RE = re.compile(
     r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv|stories)/\S+", re.IGNORECASE,
 )
+YOUTUBE_RE = re.compile(
+    r"https?://(?:(?:www\.|m\.)?youtube\.com/(?:watch\S+|shorts/\S+|live/\S+)|youtu\.be/\S+)", re.IGNORECASE,
+)
 
 PLACEHOLDER_THUMB = "https://placehold.co/320x180/111111/ffffff?text=Video"
 
 
 def find_video_url(text: str) -> str | None:
-    for pat in (TIKTOK_RE, INSTAGRAM_RE):
+    for pat in (TIKTOK_RE, INSTAGRAM_RE, YOUTUBE_RE):
         m = pat.search(text)
         if m:
             return m.group(0)

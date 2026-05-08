@@ -2,7 +2,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "welcome": {
         "ru": (
             "👋 Привет! Я бот для скачивания видео.\n\n"
-            "🎬 Отправь мне ссылку на <b>TikTok</b> или <b>Instagram</b> — "
+            "🎬 Отправь мне ссылку на <b>TikTok</b>, <b>Instagram</b> или <b>YouTube</b> — "
             "и я пришлю видео/фото прямо в чат.\n\n"
             "🔗 <b>Inline-режим</b>: напиши <code>@имя_бота ссылку</code> "
             "в любом чате, чтобы отправить видео собеседнику.\n\n"
@@ -11,7 +11,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "en": (
             "👋 Hi! I'm a video downloader bot.\n\n"
-            "🎬 Send me a <b>TikTok</b> or <b>Instagram</b> link — "
+            "🎬 Send me a <b>TikTok</b>, <b>Instagram</b> or <b>YouTube</b> link — "
             "and I'll send the video/photos right here.\n\n"
             "🔗 <b>Inline mode</b>: type <code>@botname link</code> "
             "in any chat to send a video to your conversation.\n\n"
@@ -32,8 +32,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "❌ Video is too large (>50 MB) for Telegram.",
     },
     "unsupported_link": {
-        "ru": "🤷 Отправьте ссылку на TikTok или Instagram, чтобы я скачал видео.",
-        "en": "🤷 Send a TikTok or Instagram link so I can download the video.",
+        "ru": "🤷 Отправьте ссылку на TikTok, Instagram или YouTube, чтобы я скачал видео.",
+        "en": "🤷 Send a TikTok, Instagram or YouTube link so I can download the video.",
     },
     "choose_language": {
         "ru": "🌐 Выберите язык / Choose language:",
