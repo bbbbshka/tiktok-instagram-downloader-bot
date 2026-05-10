@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
+    InlineQueryResultCachedVideo,
     InlineQueryResultVideo,
     InputMediaPhoto,
     InputTextMessageContent,
@@ -389,17 +390,39 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
 
     results = []
 
-    if info.video_url:
+    if info.is_slideshow:
         results.append(
-            InlineQueryResultVideo(
-                id="video_0",
-                video_url=info.video_url,
-                mime_type="video/mp4",
-                thumbnail_url=thumb,
-                title=title[:128],
-                caption=caption,
-                description="Нажмите, чтобы отправить / Tap to send",
+            InlineQueryResultArticle(
+                id="slideshow_inline_unavailable",
+                title="🖼️ Фото-пост открой через бота",
+                description="Inline Telegram не умеет нормально отправлять такие TikTok фото-посты",
+                input_message_content=InputTextMessageContent(
+                    message_text="🖼️ Этот TikTok фото-пост лучше открыть через бота в личке — там будут кнопки ◀️ ▶️ и переключение фото в одном сообщении.",
+                ),
             ),
         )
+    else:
+        cached_fid = file_id_cache.get(url)
+        if isinstance(cached_fid, str):
+            results.append(
+                InlineQueryResultCachedVideo(
+                    id="cached_video_0",
+                    video_file_id=cached_fid,
+                    title=title[:128],
+                    description="Готово к отправке из кеша",
+                    caption=caption,
+                ),
+            )
+        elif info.video_url:
+            results.append(
+                InlineQueryResultArticle(
+                    id="inline_prepare",
+                    title="⚠️ Сначала открой ссылку в боте",
+                    description="Telegram часто не может забрать TikTok видео напрямую в inline",
+                    input_message_content=InputTextMessageContent(
+                        message_text="⚠️ Сначала отправь эту ссылку боту в личку, после этого видео появится в inline из кеша.",
+                    ),
+                ),
+            )
 
-    await inline_query.answer(results, cache_time=300, is_personal=False)
+    await inline_query.answer(results, cache_time=60, is_personal=True)
