@@ -14,13 +14,13 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
-    InlineQueryResultVideo,
     InputMediaPhoto,
     InputTextMessageContent,
     Message,
     URLInputFile,
 )
 
+from config import INLINE_CACHE_CHAT_ID
 from database import get_user_language, register_user
 from i18n import t
 from services.video_downloader import (
@@ -79,6 +79,43 @@ def _fmt_count(n: int | None) -> str:
 
 
 def _build_caption(info: VideoInfo) -> str | None:
+    return None
+
+
+async def _warm_inline_cache(bot, url: str) -> str | None:
+    if not INLINE_CACHE_CHAT_ID:
+        return None
+
+    cached = file_id_cache.get(url)
+    if isinstance(cached, str):
+        return cached
+
+    info = await downloader.download(url)
+    if not info or not info.file_path:
+        return None
+
+    try:
+        sent = await bot.send_video(
+            chat_id=INLINE_CACHE_CHAT_ID,
+            video=FSInputFile(info.file_path),
+            caption=_build_caption(info),
+            supports_streaming=True,
+        )
+        if sent.video:
+            file_id_cache.set(url, sent.video.file_id)
+            return sent.video.file_id
+    except Exception:
+        logger.exception("Failed to warm inline cache for %s", url)
+    finally:
+        if info.file_path and os.path.exists(info.file_path):
+            os.remove(info.file_path)
+        tmp_dir = os.path.dirname(info.file_path) if info.file_path else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
     return None
 
 
@@ -403,24 +440,32 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
         )
     else:
         cached_fid = file_id_cache.get(url)
+        if not isinstance(cached_fid, str):
+            cached_fid = await _warm_inline_cache(inline_query.bot, url)
+
         if isinstance(cached_fid, str):
             results.append(
                 InlineQueryResultCachedVideo(
                     id="cached_video_0",
                     video_file_id=cached_fid,
                     title=title[:128],
-                    description="Готово к отправке из кеша",
+                    description="Готово к отправке",
                     caption=caption,
                 ),
             )
         elif info.video_url:
+            description = (
+                "Нужен INLINE_CACHE_CHAT_ID в .env"
+                if not INLINE_CACHE_CHAT_ID
+                else "Не удалось прогреть Telegram-кеш для этого видео"
+            )
             results.append(
                 InlineQueryResultArticle(
                     id="inline_prepare",
-                    title="⚠️ Сначала открой ссылку в боте",
-                    description="Telegram часто не может забрать TikTok видео напрямую в inline",
+                    title="⚠️ Inline временно недоступен",
+                    description=description,
                     input_message_content=InputTextMessageContent(
-                        message_text="⚠️ Сначала отправь эту ссылку боту в личку, после этого видео появится в inline из кеша.",
+                        message_text="⚠️ Inline для этого видео сейчас недоступен. Отправь ссылку боту в личку.",
                     ),
                 ),
             )
