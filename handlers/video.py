@@ -1,0 +1,639 @@
+"""Handlers: PM link → video/photos, inline @bot <link>, buttons (music, comments)."""
+
+import logging
+import os
+import re
+
+from aiogram import Router, F
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedPhoto,
+    InlineQueryResultCachedVideo,
+    InlineQueryResultPhoto,
+    InlineQueryResultVideo,
+    InputMediaPhoto,
+    InputTextMessageContent,
+    Message,
+    URLInputFile,
+)
+
+from config import INLINE_CACHE_CHAT_ID
+from database import get_user_language, register_user
+from i18n import t
+from services.video_downloader import (
+    VideoDownloader,
+    VideoInfo,
+    file_id_cache,
+    info_cache,
+    url_store,
+)
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+downloader = VideoDownloader()
+
+# ---------------------------------------------------------------------------
+# URL patterns
+# ---------------------------------------------------------------------------
+
+TIKTOK_RE = re.compile(
+    r"https?://(?:www\.|vm\.|vt\.|m\.)?tiktok\.com/\S+", re.IGNORECASE,
+)
+INSTAGRAM_RE = re.compile(
+    r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv|stories)/\S+", re.IGNORECASE,
+)
+YOUTUBE_RE = re.compile(
+    r"https?://(?:(?:www\.|m\.)?youtube\.com/(?:watch\S+|shorts/\S+|live/\S+)|youtu\.be/\S+)", re.IGNORECASE,
+)
+
+PLACEHOLDER_THUMB = "https://placehold.co/320x180/111111/ffffff?text=Video"
+
+
+def find_video_url(text: str) -> str | None:
+    for pat in (TIKTOK_RE, INSTAGRAM_RE, YOUTUBE_RE):
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _has_video_url(text: str) -> bool:
+    return find_video_url(text) is not None
+
+
+# ---------------------------------------------------------------------------
+# Helpers: format caption & build keyboard
+# ---------------------------------------------------------------------------
+
+def _fmt_count(n: int | None) -> str:
+    if n is None:
+        return ""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _build_caption(info: VideoInfo) -> str | None:
+    return None
+
+
+async def _warm_inline_cache(bot, url: str) -> str | None:
+    if not INLINE_CACHE_CHAT_ID:
+        return None
+
+    cached = file_id_cache.get(url)
+    if isinstance(cached, str):
+        return cached
+
+    info = await downloader.download(url)
+    if not info or not info.file_path:
+        return None
+
+    try:
+        sent = await bot.send_video(
+            chat_id=INLINE_CACHE_CHAT_ID,
+            video=FSInputFile(info.file_path),
+            caption=_build_caption(info),
+            supports_streaming=True,
+            width=info.width or None,
+            height=info.height or None,
+            duration=info.duration or None,
+        )
+        if sent.video:
+            file_id_cache.set(url, sent.video.file_id)
+            return sent.video.file_id
+    except Exception:
+        logger.exception("Failed to warm inline cache for %s", url)
+    finally:
+        if info.file_path and os.path.exists(info.file_path):
+            os.remove(info.file_path)
+        tmp_dir = os.path.dirname(info.file_path) if info.file_path else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+    return None
+
+
+async def _warm_inline_photo_cache(bot, url: str, photos: list[str]) -> list[str] | None:
+    if not INLINE_CACHE_CHAT_ID or not photos:
+        return None
+
+    cache_key = f"photos:{url}"
+    cached = file_id_cache.get(cache_key)
+    if isinstance(cached, list):
+        return cached
+
+    photo_files = await downloader.download_photos(url)
+    file_ids: list[str] = []
+
+    if photo_files:
+        for pf in photo_files:
+            try:
+                sent = await bot.send_photo(
+                    chat_id=INLINE_CACHE_CHAT_ID,
+                    photo=FSInputFile(pf),
+                )
+                if sent.photo:
+                    file_ids.append(sent.photo[-1].file_id)
+            except Exception:
+                logger.warning("Failed to cache photo file %s", pf)
+        for pf in photo_files:
+            try:
+                os.remove(pf)
+            except OSError:
+                pass
+        tmp_dir = os.path.dirname(photo_files[0]) if photo_files else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+    else:
+        for photo_url in photos:
+            try:
+                sent = await bot.send_photo(
+                    chat_id=INLINE_CACHE_CHAT_ID,
+                    photo=photo_url,
+                )
+                if sent.photo:
+                    file_ids.append(sent.photo[-1].file_id)
+            except Exception:
+                logger.warning("Failed to cache photo %s", photo_url[:80])
+
+    if file_ids:
+        file_id_cache.set(cache_key, file_ids)
+    return file_ids or None
+
+
+def _build_keyboard(
+    url: str,
+    info: VideoInfo,
+    page: int = 0,
+    bot_username: str | None = None,
+) -> InlineKeyboardMarkup:
+    url_hash = url_store.put(url)
+    row1: list[InlineKeyboardButton] = []
+    row2: list[InlineKeyboardButton] = []
+
+    # Navigation for slideshows
+    if info.is_slideshow and len(info.photos) > 1:
+        total = len(info.photos)
+        if page > 0:
+            row1.append(InlineKeyboardButton(text="◀️", callback_data=f"page:{url_hash}:{page - 1}"))
+        row1.append(InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="noop"))
+        if page < total - 1:
+            row1.append(InlineKeyboardButton(text="▶️", callback_data=f"page:{url_hash}:{page + 1}"))
+
+    # Stats row
+    if info.like_count is not None:
+        row2.append(InlineKeyboardButton(text=f"❤️ {_fmt_count(info.like_count)}", callback_data="noop"))
+    if info.comment_count is not None:
+        if bot_username:
+            row2.append(InlineKeyboardButton(
+                text=f"💬 {_fmt_count(info.comment_count)}",
+                url=f"https://t.me/{bot_username}?start=comments_{url_hash}",
+            ))
+        else:
+            row2.append(InlineKeyboardButton(
+                text=f"💬 {_fmt_count(info.comment_count)}",
+                callback_data=f"comments:{url_hash}",
+            ))
+
+    # Action row
+    row3: list[InlineKeyboardButton] = []
+    if bot_username:
+        row3.append(InlineKeyboardButton(
+            text="🎵 Музыка",
+            url=f"https://t.me/{bot_username}?start=music_{url_hash}",
+        ))
+    else:
+        row3.append(InlineKeyboardButton(text="🎵 Музыка", callback_data=f"music:{url_hash}"))
+
+    rows = []
+    if row1:
+        rows.append(row1)
+    if row2:
+        rows.append(row2)
+    rows.append(row3)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------------------------------------------------------------------------
+# PM: user sends a TikTok / Instagram link
+# ---------------------------------------------------------------------------
+
+@router.message(F.text.func(_has_video_url))
+async def on_video_link(message: Message) -> None:
+    url = find_video_url(message.text)
+    if not url:
+        return
+
+    user_id = message.from_user.id
+    lang = await get_user_language(user_id)
+
+    status_msg = await message.answer(t("video_downloading", lang))
+
+    info = await downloader.extract_info(url)
+    if not info:
+        await status_msg.edit_text(t("video_error", lang))
+        return
+
+    info_cache.set(url, info)
+    caption = _build_caption(info)
+    keyboard = _build_keyboard(url, info)
+
+    try:
+        # ---- Slideshow (photos) ----
+        if info.is_slideshow and info.photos:
+            photo_files = await downloader.download_photos(url)
+            if photo_files:
+                sent = await message.answer_photo(
+                    photo=FSInputFile(photo_files[0]),
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                if sent.photo:
+                    fids = [sent.photo[-1].file_id]
+                    for pf in photo_files[1:]:
+                        try:
+                            s2 = await message.bot.send_photo(
+                                chat_id=message.chat.id,
+                                photo=FSInputFile(pf),
+                            )
+                            if s2.photo:
+                                fids.append(s2.photo[-1].file_id)
+                            await s2.delete()
+                        except Exception:
+                            fids.append("")
+                    file_id_cache.set(f"photos:{url}", fids)
+                for pf in photo_files:
+                    try:
+                        os.remove(pf)
+                    except OSError:
+                        pass
+                tmp_dir = os.path.dirname(photo_files[0]) if photo_files else None
+                if tmp_dir and os.path.isdir(tmp_dir):
+                    try:
+                        os.rmdir(tmp_dir)
+                    except OSError:
+                        pass
+            else:
+                await message.answer_photo(
+                    photo=info.photos[0],
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+            await status_msg.delete()
+            return
+
+        # ---- Video ----
+        # Need to actually download the video file
+        cached_fid = file_id_cache.get(url)
+        if not cached_fid:
+            dl_info = await downloader.download(url)
+            if dl_info:
+                info.file_path = dl_info.file_path
+                info.width = info.width or dl_info.width
+                info.height = info.height or dl_info.height
+
+        if not info.file_path and not cached_fid:
+            await status_msg.edit_text(t("video_error", lang))
+            return
+
+        # Fast path: cached file_id
+        if cached_fid:
+            try:
+                await message.answer_video(
+                    video=cached_fid,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                await status_msg.delete()
+                return
+            except Exception:
+                file_id_cache._store.pop(url, None)
+
+        sent = await message.answer_video(
+            video=FSInputFile(info.file_path),
+            caption=caption,
+            supports_streaming=True,
+            width=info.width or None,
+            height=info.height or None,
+            duration=info.duration or None,
+            reply_markup=keyboard,
+        )
+        await status_msg.delete()
+
+        if sent.video:
+            file_id_cache.set(url, sent.video.file_id)
+    except Exception:
+        logger.exception("Failed to send media for %s", url)
+        await status_msg.edit_text(t("video_error", lang))
+    finally:
+        if info.file_path and os.path.exists(info.file_path):
+            os.remove(info.file_path)
+        tmp_dir = os.path.dirname(info.file_path) if info.file_path else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Callback: music download
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("music:"))
+async def on_music_callback(callback: CallbackQuery) -> None:
+    url_hash = callback.data.split(":", 1)[1]
+    url = url_store.get(url_hash)
+    if not url:
+        await callback.answer("Ссылка не найдена, отправьте заново", show_alert=True)
+        return
+
+    lang = await get_user_language(callback.from_user.id)
+    if callback.inline_message_id and not callback.message:
+        await callback.answer("Открой это в боте в личке для музыки", show_alert=True)
+        return
+
+    await callback.answer(t("music_downloading", lang))
+
+    audio_path = await downloader.download_audio(url)
+    if not audio_path or not os.path.exists(audio_path):
+        await callback.message.answer(t("music_error", lang))
+        return
+
+    try:
+        info = await downloader.extract_info(url)
+        title = "Audio"
+        performer = ""
+        if info:
+            title = info.music_title or info.title or "Audio"
+            performer = info.music_author or info.author or ""
+
+        await callback.message.answer_audio(
+            audio=FSInputFile(audio_path),
+            title=title[:64],
+            performer=performer[:64] if performer else None,
+        )
+    except Exception:
+        logger.exception("Failed to send audio for %s", url)
+        await callback.message.answer(t("music_error", lang))
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+        tmp_dir = os.path.dirname(audio_path) if audio_path else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Callback: show comments
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("comments:"))
+async def on_comments_callback(callback: CallbackQuery) -> None:
+    url_hash = callback.data.split(":", 1)[1]
+    url = url_store.get(url_hash)
+    if not url:
+        await callback.answer("Ссылка не найдена, отправьте заново", show_alert=True)
+        return
+
+    lang = await get_user_language(callback.from_user.id)
+    if callback.inline_message_id and not callback.message:
+        await callback.answer("Открой это в боте в личке для комментариев", show_alert=True)
+        return
+
+    await callback.answer(t("comments_loading", lang))
+
+    comments = await downloader.extract_comments(url)
+    if not comments:
+        key = "comments_unavailable" if "tiktok.com" in url else "comments_empty"
+        await callback.message.answer(t(key, lang))
+        return
+
+    lines: list[str] = [f"💬 <b>{t('comments_title', lang)}</b>\n"]
+    for i, c in enumerate(comments[:10], 1):
+        likes = f"  ❤️ {_fmt_count(c['likes'])}" if c["likes"] else ""
+        lines.append(f"{i}. <b>{c['author']}</b>{likes}\n{c['text']}\n")
+
+    text = "\n".join(lines)
+    if len(text) > 4096:
+        text = text[:4093] + "…"
+
+    await callback.message.answer(text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# Callback: noop (stats buttons, page indicator)
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data == "noop")
+async def on_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Callback: slideshow page navigation
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("page:"))
+async def on_page_callback(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    url_hash = parts[1]
+    page = int(parts[2])
+    url = url_store.get(url_hash)
+    if not url:
+        await callback.answer("Ссылка не найдена", show_alert=True)
+        return
+
+    info = await downloader.extract_info(url)
+    if not info or not info.is_slideshow or page >= len(info.photos):
+        await callback.answer()
+        return
+
+    is_inline = bool(callback.inline_message_id and not callback.message)
+    me = await callback.bot.me() if is_inline else None
+    bot_username = me.username if me else None
+
+    keyboard = _build_keyboard(url, info, page=page, bot_username=bot_username)
+    try:
+        cache_key = f"photos:{url}"
+        cached_photos = file_id_cache.get(cache_key)
+        if isinstance(cached_photos, list) and page < len(cached_photos):
+            media_ref = cached_photos[page]
+        else:
+            media_ref = info.photos[page]
+
+        caption = _build_caption(info)
+        if is_inline:
+            await callback.bot.edit_message_media(
+                inline_message_id=callback.inline_message_id,
+                media=InputMediaPhoto(media=media_ref, caption=caption),
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(media=media_ref, caption=caption),
+                reply_markup=keyboard,
+            )
+        await callback.answer()
+    except Exception:
+        logger.exception("Slideshow navigation failed")
+        await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Fallback: message without a link
+# ---------------------------------------------------------------------------
+
+@router.message(F.text)
+async def on_other_text(message: Message) -> None:
+    lang = await get_user_language(message.from_user.id)
+    await message.answer(t("unsupported_link", lang))
+
+
+# ---------------------------------------------------------------------------
+# Inline mode: @bot <tiktok / insta link>
+# ---------------------------------------------------------------------------
+
+@router.inline_query()
+async def on_inline_query(inline_query: InlineQuery) -> None:
+    query = inline_query.query.strip()
+
+    if not query:
+        await inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="hint",
+                    title="Вставьте ссылку TikTok или Instagram",
+                    description="Paste a TikTok or Instagram link",
+                    input_message_content=InputTextMessageContent(
+                        message_text="Отправьте ссылку TikTok или Instagram для загрузки видео.",
+                    ),
+                ),
+            ],
+            cache_time=5,
+            is_personal=True,
+        )
+        return
+
+    url = find_video_url(query)
+    if not url:
+        await inline_query.answer([], cache_time=5, is_personal=True)
+        return
+
+    user = inline_query.from_user
+    await register_user(
+        user_id=user.id,
+        username=user.username or "",
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+    )
+
+    info = await downloader.extract_info(url)
+    if not info or (not info.video_url and not info.is_slideshow):
+        await inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="error",
+                    title="❌ Не удалось загрузить",
+                    description="Could not fetch this content",
+                    input_message_content=InputTextMessageContent(
+                        message_text="❌ Не удалось загрузить контент с этой ссылки.",
+                    ),
+                ),
+            ],
+            cache_time=10,
+            is_personal=True,
+        )
+        return
+
+    thumb = info.thumbnail_url or PLACEHOLDER_THUMB
+    title = "Отправить видео"
+    caption = _build_caption(info)
+
+    me = await inline_query.bot.me()
+    bot_username = me.username or ""
+
+    results = []
+
+    keyboard = _build_keyboard(url, info, bot_username=bot_username)
+
+    if info.is_slideshow and info.photos:
+        photo_fids = await _warm_inline_photo_cache(inline_query.bot, url, info.photos)
+        first_photo = photo_fids[0] if photo_fids else info.photos[0]
+
+        if photo_fids and not first_photo.startswith("http"):
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id="photo_0",
+                    photo_file_id=first_photo,
+                    title="Отправить фото",
+                    description=f"TikTok фото-пост ({len(info.photos)} фото)",
+                    caption=caption,
+                    reply_markup=keyboard,
+                ),
+            )
+        else:
+            results.append(
+                InlineQueryResultPhoto(
+                    id="photo_0",
+                    photo_url=info.photos[0],
+                    thumbnail_url=info.photos[0],
+                    title="Отправить фото",
+                    description=f"TikTok фото-пост ({len(info.photos)} фото)",
+                    caption=caption,
+                    reply_markup=keyboard,
+                ),
+            )
+    else:
+        cached_fid = file_id_cache.get(url)
+        if not isinstance(cached_fid, str):
+            cached_fid = await _warm_inline_cache(inline_query.bot, url)
+
+        if isinstance(cached_fid, str):
+            results.append(
+                InlineQueryResultCachedVideo(
+                    id="cached_video_0",
+                    video_file_id=cached_fid,
+                    title=title[:128],
+                    description="Готово к отправке",
+                    caption=caption,
+                    reply_markup=keyboard,
+                ),
+            )
+        elif info.video_url:
+            results.append(
+                InlineQueryResultVideo(
+                    id="video_0",
+                    video_url=info.video_url,
+                    mime_type="video/mp4",
+                    thumbnail_url=thumb,
+                    title=title[:128],
+                    caption=caption,
+                    description="Нажмите, чтобы отправить / Tap to send",
+                    reply_markup=keyboard,
+                ),
+            )
+
+    await inline_query.answer(results, cache_time=60, is_personal=True)
