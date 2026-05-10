@@ -68,6 +68,9 @@ class VideoInfo:
     # photos (TikTok slideshow)
     photos: list[str] = field(default_factory=list)
     is_slideshow: bool = False
+    # dimensions
+    width: int | None = None
+    height: int | None = None
     # music
     music_title: str = ""
     music_author: str = ""
@@ -142,8 +145,9 @@ _COMMON_OPTS: dict = {
 }
 
 _BEST_FORMAT = (
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-    "bestvideo+bestaudio/"
+    "best[ext=mp4][height<=1080][filesize<50M]/"
+    "bestvideo[ext=mp4][height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
     "best[ext=mp4][filesize<50M]/"
     "best[ext=mp4]/"
     "best[filesize<50M]/"
@@ -493,6 +497,14 @@ class VideoDownloader:
         track = info.get("track") or ""
         artist = info.get("artist") or ""
 
+        w = info.get("width")
+        h = info.get("height")
+        if not w or not h:
+            rd = info.get("requested_downloads") or []
+            if rd:
+                w = w or rd[0].get("width")
+                h = h or rd[0].get("height")
+
         return VideoInfo(
             title=title,
             thumbnail_url=thumbnail or None,
@@ -505,6 +517,8 @@ class VideoDownloader:
             comment_count=info.get("comment_count"),
             photos=photos,
             is_slideshow=is_slideshow,
+            width=_to_int(w),
+            height=_to_int(h),
             music_title=track,
             music_author=artist,
         )

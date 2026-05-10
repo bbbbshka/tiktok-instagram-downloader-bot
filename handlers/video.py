@@ -103,6 +103,9 @@ async def _warm_inline_cache(bot, url: str) -> str | None:
             video=FSInputFile(info.file_path),
             caption=_build_caption(info),
             supports_streaming=True,
+            width=info.width or None,
+            height=info.height or None,
+            duration=info.duration or None,
         )
         if sent.video:
             file_id_cache.set(url, sent.video.file_id)
@@ -317,6 +320,9 @@ async def on_video_link(message: Message) -> None:
             video=FSInputFile(info.file_path),
             caption=caption,
             supports_streaming=True,
+            width=info.width or None,
+            height=info.height or None,
+            duration=info.duration or None,
             reply_markup=keyboard,
         )
         await status_msg.delete()
