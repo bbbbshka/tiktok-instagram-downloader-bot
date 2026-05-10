@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
+    InlineQueryResultCachedPhoto,
     InlineQueryResultCachedVideo,
     InlineQueryResultPhoto,
     InlineQueryResultVideo,
@@ -121,7 +122,39 @@ async def _warm_inline_cache(bot, url: str) -> str | None:
     return None
 
 
-def _build_keyboard(url: str, info: VideoInfo, page: int = 0) -> InlineKeyboardMarkup:
+async def _warm_inline_photo_cache(bot, url: str, photos: list[str]) -> list[str] | None:
+    if not INLINE_CACHE_CHAT_ID or not photos:
+        return None
+
+    cache_key = f"photos:{url}"
+    cached = file_id_cache.get(cache_key)
+    if isinstance(cached, list):
+        return cached
+
+    file_ids: list[str] = []
+    for photo_url in photos:
+        try:
+            sent = await bot.send_photo(
+                chat_id=INLINE_CACHE_CHAT_ID,
+                photo=photo_url,
+            )
+            if sent.photo:
+                file_ids.append(sent.photo[-1].file_id)
+        except Exception:
+            logger.warning("Failed to cache photo %s", photo_url[:80])
+            file_ids.append(photo_url)
+
+    if file_ids:
+        file_id_cache.set(cache_key, file_ids)
+    return file_ids or None
+
+
+def _build_keyboard(
+    url: str,
+    info: VideoInfo,
+    page: int = 0,
+    bot_username: str | None = None,
+) -> InlineKeyboardMarkup:
     url_hash = url_store.put(url)
     row1: list[InlineKeyboardButton] = []
     row2: list[InlineKeyboardButton] = []
@@ -139,11 +172,26 @@ def _build_keyboard(url: str, info: VideoInfo, page: int = 0) -> InlineKeyboardM
     if info.like_count is not None:
         row2.append(InlineKeyboardButton(text=f"❤️ {_fmt_count(info.like_count)}", callback_data="noop"))
     if info.comment_count is not None:
-        row2.append(InlineKeyboardButton(text=f"💬 {_fmt_count(info.comment_count)}", callback_data=f"comments:{url_hash}"))
+        if bot_username:
+            row2.append(InlineKeyboardButton(
+                text=f"💬 {_fmt_count(info.comment_count)}",
+                url=f"https://t.me/{bot_username}?start=comments_{url_hash}",
+            ))
+        else:
+            row2.append(InlineKeyboardButton(
+                text=f"💬 {_fmt_count(info.comment_count)}",
+                callback_data=f"comments:{url_hash}",
+            ))
 
     # Action row
     row3: list[InlineKeyboardButton] = []
-    row3.append(InlineKeyboardButton(text="🎵 Музыка", callback_data=f"music:{url_hash}"))
+    if bot_username:
+        row3.append(InlineKeyboardButton(
+            text="🎵 Музыка",
+            url=f"https://t.me/{bot_username}?start=music_{url_hash}",
+        ))
+    else:
+        row3.append(InlineKeyboardButton(text="🎵 Музыка", callback_data=f"music:{url_hash}"))
 
     rows = []
     if row1:
@@ -351,19 +399,29 @@ async def on_page_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    keyboard = _build_keyboard(url, info, page=page)
+    is_inline = bool(callback.inline_message_id and not callback.message)
+    me = await callback.bot.me() if is_inline else None
+    bot_username = me.username if me else None
+
+    keyboard = _build_keyboard(url, info, page=page, bot_username=bot_username)
     try:
-        photo_url = info.photos[page]
+        cache_key = f"photos:{url}"
+        cached_photos = file_id_cache.get(cache_key)
+        if isinstance(cached_photos, list) and page < len(cached_photos):
+            media_ref = cached_photos[page]
+        else:
+            media_ref = info.photos[page]
+
         caption = _build_caption(info)
-        if callback.inline_message_id and not callback.message:
+        if is_inline:
             await callback.bot.edit_message_media(
                 inline_message_id=callback.inline_message_id,
-                media=InputMediaPhoto(media=photo_url, caption=caption),
+                media=InputMediaPhoto(media=media_ref, caption=caption),
                 reply_markup=keyboard,
             )
         else:
             await callback.message.edit_media(
-                media=InputMediaPhoto(media=photo_url, caption=caption),
+                media=InputMediaPhoto(media=media_ref, caption=caption),
                 reply_markup=keyboard,
             )
         await callback.answer()
@@ -442,22 +500,40 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
     title = "Отправить видео"
     caption = _build_caption(info)
 
+    me = await inline_query.bot.me()
+    bot_username = me.username or ""
+
     results = []
 
-    keyboard = _build_keyboard(url, info)
+    keyboard = _build_keyboard(url, info, bot_username=bot_username)
 
     if info.is_slideshow and info.photos:
-        results.append(
-            InlineQueryResultPhoto(
-                id="photo_0",
-                photo_url=info.photos[0],
-                thumbnail_url=info.photos[0],
-                title="Отправить фото",
-                description=f"TikTok фото-пост ({len(info.photos)} фото)",
-                caption=caption,
-                reply_markup=keyboard,
-            ),
-        )
+        photo_fids = await _warm_inline_photo_cache(inline_query.bot, url, info.photos)
+        first_photo = photo_fids[0] if photo_fids else info.photos[0]
+
+        if photo_fids and not first_photo.startswith("http"):
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id="photo_0",
+                    photo_file_id=first_photo,
+                    title="Отправить фото",
+                    description=f"TikTok фото-пост ({len(info.photos)} фото)",
+                    caption=caption,
+                    reply_markup=keyboard,
+                ),
+            )
+        else:
+            results.append(
+                InlineQueryResultPhoto(
+                    id="photo_0",
+                    photo_url=info.photos[0],
+                    thumbnail_url=info.photos[0],
+                    title="Отправить фото",
+                    description=f"TikTok фото-пост ({len(info.photos)} фото)",
+                    caption=caption,
+                    reply_markup=keyboard,
+                ),
+            )
     else:
         cached_fid = file_id_cache.get(url)
         if not isinstance(cached_fid, str):
