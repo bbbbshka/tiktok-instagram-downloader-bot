@@ -30,6 +30,7 @@ from services.video_downloader import (
     VideoDownloader,
     VideoInfo,
     file_id_cache,
+    info_cache,
     url_store,
 )
 
@@ -244,11 +245,12 @@ async def on_video_link(message: Message) -> None:
 
     status_msg = await message.answer(t("video_downloading", lang))
 
-    info = await downloader.download(url)
+    info = await downloader.extract_info(url)
     if not info:
         await status_msg.edit_text(t("video_error", lang))
         return
 
+    info_cache.set(url, info)
     caption = _build_caption(info)
     keyboard = _build_keyboard(url, info)
 
@@ -297,13 +299,20 @@ async def on_video_link(message: Message) -> None:
             return
 
         # ---- Video ----
-        if not info.file_path:
-            reason = "video_too_large" if info.file_path is None else "video_error"
-            await status_msg.edit_text(t(reason, lang))
+        # Need to actually download the video file
+        cached_fid = file_id_cache.get(url)
+        if not cached_fid:
+            dl_info = await downloader.download(url)
+            if dl_info:
+                info.file_path = dl_info.file_path
+                info.width = info.width or dl_info.width
+                info.height = info.height or dl_info.height
+
+        if not info.file_path and not cached_fid:
+            await status_msg.edit_text(t("video_error", lang))
             return
 
         # Fast path: cached file_id
-        cached_fid = file_id_cache.get(url)
         if cached_fid:
             try:
                 await message.answer_video(

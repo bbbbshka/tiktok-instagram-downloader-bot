@@ -104,6 +104,7 @@ class _FileIdCache:
 
 
 file_id_cache = _FileIdCache()
+info_cache = _FileIdCache()
 
 
 class _UrlStore:
@@ -131,10 +132,11 @@ _COMMON_OPTS: dict = {
     "quiet": True,
     "no_warnings": True,
     "no_color": True,
-    "socket_timeout": 20,
-    "retries": 2,
-    "extractor_retries": 2,
+    "socket_timeout": 10,
+    "retries": 1,
+    "extractor_retries": 1,
     "concurrent_fragment_downloads": CONCURRENT_FRAGMENTS,
+    "noprogress": True,
     "http_headers": {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -146,9 +148,8 @@ _COMMON_OPTS: dict = {
 
 _BEST_FORMAT = (
     "best[ext=mp4][height<=1080][filesize<50M]/"
-    "bestvideo[ext=mp4][height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/"
-    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
-    "best[ext=mp4][filesize<50M]/"
+    "best[ext=mp4][height<=720][filesize<50M]/"
+    "bestvideo[ext=mp4][vcodec^=avc][height<=1080]+bestaudio[ext=m4a]/"
     "best[ext=mp4]/"
     "best[filesize<50M]/"
     "best"
@@ -176,9 +177,16 @@ class VideoDownloader:
     # ---------- extract info (no download) ----------
 
     async def extract_info(self, url: str) -> VideoInfo | None:
+        cached = info_cache.get(url)
+        if isinstance(cached, VideoInfo):
+            return cached
+
         resolved = await self._resolve_url(url)
         if self._is_tiktok_photo_url(resolved):
-            return await self._gallery_dl_photos(resolved, VideoInfo(extractor="tiktok"))
+            result = await self._gallery_dl_photos(resolved, VideoInfo(extractor="tiktok"))
+            if result and result.is_slideshow:
+                info_cache.set(url, result)
+            return result
 
         normalized = self._normalize_tiktok_url(resolved)
         opts = {**_COMMON_OPTS, "skip_download": True, "format": _BEST_FORMAT}
@@ -189,7 +197,10 @@ class VideoDownloader:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_extract, opts, normalized,
             )
-            return self._parse_info(info) if info else None
+            result = self._parse_info(info) if info else None
+            if result:
+                info_cache.set(url, result)
+            return result
         except Exception:
             logger.exception("extract_info failed for %s", url)
             return None
@@ -209,6 +220,7 @@ class VideoDownloader:
             "format": _BEST_FORMAT,
             "outtmpl": out_tpl,
             "merge_output_format": "mp4",
+            "postprocessor_args": {"merger": ["-c", "copy"]},
         }
         ck = _cookies_for_url(resolved)
         if ck:
