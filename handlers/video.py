@@ -140,13 +140,9 @@ async def on_video_link(message: Message) -> None:
     try:
         # ---- Slideshow (photos) ----
         if info.is_slideshow and info.photos:
-            media = []
-            for i, photo_url in enumerate(info.photos[:10]):
-                cap = caption if i == 0 else None
-                media.append(InputMediaPhoto(media=photo_url, caption=cap))
-            await message.answer_media_group(media=media)
-            await message.answer(
-                t("slideshow_actions", lang),
+            await message.answer_photo(
+                photo=info.photos[0],
+                caption=caption,
                 reply_markup=keyboard,
             )
             await status_msg.delete()
@@ -311,8 +307,11 @@ async def on_page_callback(callback: CallbackQuery) -> None:
     try:
         photo_url = info.photos[page]
         caption = _build_caption(info)
-        await callback.message.answer_photo(photo=photo_url, caption=caption)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await callback.message.edit_media(
+            media=InputMediaPhoto(media=photo_url, caption=caption),
+            reply_markup=keyboard,
+        )
+        await callback.answer()
     except Exception:
         logger.exception("Slideshow navigation failed")
         await callback.answer()
