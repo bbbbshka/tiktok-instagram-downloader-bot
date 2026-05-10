@@ -61,6 +61,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "💬 Комментариев не найдено.",
         "en": "💬 No comments found.",
     },
+    "comments_unavailable": {
+        "ru": "💬 TikTok не отдал тексты комментариев. Счётчик есть, но сами комментарии сейчас скрыты с их стороны.",
+        "en": "💬 TikTok did not return the comment texts. The count exists, but the comments are currently hidden on their side.",
+    },
     "comments_title": {
         "ru": "Топ комментарии",
         "en": "Top comments",

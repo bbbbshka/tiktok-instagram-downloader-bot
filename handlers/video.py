@@ -260,7 +260,8 @@ async def on_comments_callback(callback: CallbackQuery) -> None:
 
     comments = await downloader.extract_comments(url)
     if not comments:
-        await callback.message.answer(t("comments_empty", lang))
+        key = "comments_unavailable" if "tiktok.com" in url else "comments_empty"
+        await callback.message.answer(t(key, lang))
         return
 
     lines: list[str] = [f"💬 <b>{t('comments_title', lang)}</b>\n"]

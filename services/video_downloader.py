@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from urllib.request import Request, urlopen
 
 import yt_dlp
 
@@ -155,18 +156,17 @@ class VideoDownloader:
     # ---------- extract info (no download) ----------
 
     async def extract_info(self, url: str) -> VideoInfo | None:
-        normalized = self._normalize_tiktok_url(url)
+        resolved = await self._resolve_url(url)
+        if self._is_tiktok_photo_url(resolved):
+            return await self._gallery_dl_photos(resolved, VideoInfo(extractor="tiktok"))
+
+        normalized = self._normalize_tiktok_url(resolved)
         opts = {**_COMMON_OPTS, "skip_download": True, "format": _BEST_FORMAT}
         try:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_extract, opts, normalized,
             )
-            if info is None:
-                return None
-            vi = self._parse_info(info)
-            if self._is_tiktok_photo_url(url) and not vi.is_slideshow:
-                vi = await self._gallery_dl_photos(url, vi)
-            return vi
+            return self._parse_info(info) if info else None
         except Exception:
             logger.exception("extract_info failed for %s", url)
             return None
@@ -174,7 +174,11 @@ class VideoDownloader:
     # ---------- download video ----------
 
     async def download(self, url: str) -> VideoInfo | None:
-        normalized = self._normalize_tiktok_url(url)
+        resolved = await self._resolve_url(url)
+        if self._is_tiktok_photo_url(resolved):
+            return await self._gallery_dl_photos(resolved, VideoInfo(extractor="tiktok"))
+
+        normalized = self._normalize_tiktok_url(resolved)
         tmp_dir = tempfile.mkdtemp(prefix="tgvid_")
         out_tpl = os.path.join(tmp_dir, "%(id)s.%(ext)s")
         opts = {
@@ -191,10 +195,6 @@ class VideoDownloader:
                 return None
 
             vi = self._parse_info(info)
-
-            # TikTok photo post: use gallery-dl fallback
-            if self._is_tiktok_photo_url(url) and not vi.is_slideshow:
-                vi = await self._gallery_dl_photos(url, vi)
 
             # If it's a slideshow, no video file needed
             if vi.is_slideshow:
@@ -260,6 +260,7 @@ class VideoDownloader:
 
     async def extract_comments(self, url: str) -> list[dict]:
         """Return top comments: [{'author': str, 'text': str, 'likes': int}]."""
+        resolved = await self._resolve_url(url)
         opts = {
             **_COMMON_OPTS,
             "skip_download": True,
@@ -268,7 +269,7 @@ class VideoDownloader:
         }
         try:
             info = await asyncio.get_event_loop().run_in_executor(
-                None, self._run_extract, opts, url,
+                None, self._run_extract, opts, resolved,
             )
             if not info:
                 return []
@@ -299,10 +300,25 @@ class VideoDownloader:
         return "/photo/" in url and "tiktok.com" in url
 
     @staticmethod
+    async def _resolve_url(url: str) -> str:
+        """Resolve TikTok short links to their final URL."""
+        if "tiktok.com" not in url or ("/video/" in url or "/photo/" in url):
+            return url
+        try:
+            req = Request(url, headers={"User-Agent": _COMMON_OPTS["http_headers"]["User-Agent"]})
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: urlopen(req, timeout=20).geturl(),
+            )
+        except Exception:
+            logger.exception("Failed to resolve short url %s", url)
+            return url
+
+    @staticmethod
     def _normalize_tiktok_url(url: str) -> str:
         """Convert /photo/ TikTok URLs to /video/ so yt-dlp can handle them."""
         if "tiktok.com" in url and "/photo/" in url:
-            return url.replace("/photo/", "/video/")
+            return url.replace("/photo/", "/video/").split("?", 1)[0]
         return url
 
     async def _gallery_dl_photos(self, url: str, base_info: VideoInfo) -> VideoInfo:
