@@ -306,10 +306,14 @@ class VideoDownloader:
             return url
         try:
             req = Request(url, headers={"User-Agent": _COMMON_OPTS["http_headers"]["User-Agent"]})
-            return await asyncio.get_event_loop().run_in_executor(
+            final = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: urlopen(req, timeout=20).geturl(),
             )
+            if final.rstrip("/") in ("https://www.tiktok.com", "https://www.tiktok.com/?_r=1"):
+                logger.warning("Short link %s resolved to homepage (expired?)", url)
+                return url
+            return final
         except Exception:
             logger.exception("Failed to resolve short url %s", url)
             return url
