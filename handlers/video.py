@@ -131,18 +131,42 @@ async def _warm_inline_photo_cache(bot, url: str, photos: list[str]) -> list[str
     if isinstance(cached, list):
         return cached
 
+    photo_files = await downloader.download_photos(url)
     file_ids: list[str] = []
-    for photo_url in photos:
-        try:
-            sent = await bot.send_photo(
-                chat_id=INLINE_CACHE_CHAT_ID,
-                photo=photo_url,
-            )
-            if sent.photo:
-                file_ids.append(sent.photo[-1].file_id)
-        except Exception:
-            logger.warning("Failed to cache photo %s", photo_url[:80])
-            file_ids.append(photo_url)
+
+    if photo_files:
+        for pf in photo_files:
+            try:
+                sent = await bot.send_photo(
+                    chat_id=INLINE_CACHE_CHAT_ID,
+                    photo=FSInputFile(pf),
+                )
+                if sent.photo:
+                    file_ids.append(sent.photo[-1].file_id)
+            except Exception:
+                logger.warning("Failed to cache photo file %s", pf)
+        for pf in photo_files:
+            try:
+                os.remove(pf)
+            except OSError:
+                pass
+        tmp_dir = os.path.dirname(photo_files[0]) if photo_files else None
+        if tmp_dir and os.path.isdir(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+    else:
+        for photo_url in photos:
+            try:
+                sent = await bot.send_photo(
+                    chat_id=INLINE_CACHE_CHAT_ID,
+                    photo=photo_url,
+                )
+                if sent.photo:
+                    file_ids.append(sent.photo[-1].file_id)
+            except Exception:
+                logger.warning("Failed to cache photo %s", photo_url[:80])
 
     if file_ids:
         file_id_cache.set(cache_key, file_ids)
@@ -228,11 +252,44 @@ async def on_video_link(message: Message) -> None:
     try:
         # ---- Slideshow (photos) ----
         if info.is_slideshow and info.photos:
-            await message.answer_photo(
-                photo=info.photos[0],
-                caption=caption,
-                reply_markup=keyboard,
-            )
+            photo_files = await downloader.download_photos(url)
+            if photo_files:
+                sent = await message.answer_photo(
+                    photo=FSInputFile(photo_files[0]),
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                if sent.photo:
+                    fids = [sent.photo[-1].file_id]
+                    for pf in photo_files[1:]:
+                        try:
+                            s2 = await message.bot.send_photo(
+                                chat_id=message.chat.id,
+                                photo=FSInputFile(pf),
+                            )
+                            if s2.photo:
+                                fids.append(s2.photo[-1].file_id)
+                            await s2.delete()
+                        except Exception:
+                            fids.append("")
+                    file_id_cache.set(f"photos:{url}", fids)
+                for pf in photo_files:
+                    try:
+                        os.remove(pf)
+                    except OSError:
+                        pass
+                tmp_dir = os.path.dirname(photo_files[0]) if photo_files else None
+                if tmp_dir and os.path.isdir(tmp_dir):
+                    try:
+                        os.rmdir(tmp_dir)
+                    except OSError:
+                        pass
+            else:
+                await message.answer_photo(
+                    photo=info.photos[0],
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
             await status_msg.delete()
             return
 

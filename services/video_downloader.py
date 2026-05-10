@@ -27,7 +27,13 @@ from urllib.request import Request, urlopen
 
 import yt_dlp
 
-from config import MAX_VIDEO_SIZE, CONCURRENT_FRAGMENTS, CACHE_TTL_SECONDS
+from config import (
+    MAX_VIDEO_SIZE,
+    CONCURRENT_FRAGMENTS,
+    CACHE_TTL_SECONDS,
+    TIKTOK_COOKIES_FILE,
+    INSTAGRAM_COOKIES_FILE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +153,15 @@ _BEST_FORMAT = (
 _AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio/best"
 
 
+def _cookies_for_url(url: str) -> str:
+    """Return cookies file path for the given URL, or empty string."""
+    if "tiktok.com" in url and TIKTOK_COOKIES_FILE and os.path.isfile(TIKTOK_COOKIES_FILE):
+        return TIKTOK_COOKIES_FILE
+    if "instagram.com" in url and INSTAGRAM_COOKIES_FILE and os.path.isfile(INSTAGRAM_COOKIES_FILE):
+        return INSTAGRAM_COOKIES_FILE
+    return ""
+
+
 # ------------------------------------------------------------------
 # Downloader
 # ------------------------------------------------------------------
@@ -163,6 +178,9 @@ class VideoDownloader:
 
         normalized = self._normalize_tiktok_url(resolved)
         opts = {**_COMMON_OPTS, "skip_download": True, "format": _BEST_FORMAT}
+        ck = _cookies_for_url(resolved)
+        if ck:
+            opts["cookiefile"] = ck
         try:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_extract, opts, normalized,
@@ -188,6 +206,9 @@ class VideoDownloader:
             "outtmpl": out_tpl,
             "merge_output_format": "mp4",
         }
+        ck = _cookies_for_url(resolved)
+        if ck:
+            opts["cookiefile"] = ck
         try:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_download, opts, normalized,
@@ -239,6 +260,9 @@ class VideoDownloader:
                 },
             ],
         }
+        ck = _cookies_for_url(url)
+        if ck:
+            opts["cookiefile"] = ck
         try:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_download, opts, url,
@@ -268,6 +292,9 @@ class VideoDownloader:
             "getcomments": True,
             "format": _BEST_FORMAT,
         }
+        ck = _cookies_for_url(resolved)
+        if ck:
+            opts["cookiefile"] = ck
         try:
             info = await asyncio.get_event_loop().run_in_executor(
                 None, self._run_extract, opts, resolved,
@@ -326,13 +353,49 @@ class VideoDownloader:
             return url.replace("/photo/", "/video/").split("?", 1)[0]
         return url
 
-    async def _gallery_dl_photos(self, url: str, base_info: VideoInfo) -> VideoInfo:
-        """Use gallery-dl to extract photo URLs from TikTok photo posts."""
+    async def download_photos(self, url: str) -> list[str]:
+        """Download photos via gallery-dl to temp files, return list of file paths."""
+        resolved = await self._resolve_url(url)
+        tmp_dir = tempfile.mkdtemp(prefix="tgpho_")
+        cmd = [
+            sys.executable, "-m", "gallery_dl",
+            "--dest", tmp_dir,
+            "--filename", "{num:>02}.{extension}",
+        ]
+        ck = _cookies_for_url(resolved)
+        if ck:
+            cmd.extend(["--cookies", ck])
+        cmd.append(resolved)
         try:
             proc = await asyncio.get_event_loop().run_in_executor(
                 None,
+                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+            )
+            if proc.returncode != 0:
+                logger.warning("gallery-dl download failed for %s: %s", url, proc.stderr[:500])
+                return []
+            paths: list[str] = []
+            for root, _dirs, files in os.walk(tmp_dir):
+                for f in sorted(files):
+                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                        paths.append(os.path.join(root, f))
+            return paths
+        except Exception:
+            logger.exception("download_photos failed for %s", url)
+            return []
+
+    async def _gallery_dl_photos(self, url: str, base_info: VideoInfo) -> VideoInfo:
+        """Use gallery-dl to extract photo URLs from TikTok photo posts."""
+        try:
+            cmd = [sys.executable, "-m", "gallery_dl", "--dump-json"]
+            ck = _cookies_for_url(url)
+            if ck:
+                cmd.extend(["--cookies", ck])
+            cmd.append(url)
+            proc = await asyncio.get_event_loop().run_in_executor(
+                None,
                 lambda: subprocess.run(
-                    [sys.executable, "-m", "gallery_dl", "--dump-json", url],
+                    cmd,
                     capture_output=True, text=True, timeout=60,
                 ),
             )

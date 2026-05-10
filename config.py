@@ -18,3 +18,9 @@ CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 
 # Optional: Telegram chat/channel ID used to upload videos and reuse file_id in inline mode
 INLINE_CACHE_CHAT_ID: int = int(os.getenv("INLINE_CACHE_CHAT_ID", "0"))
+
+# Optional: path to Netscape cookies.txt for TikTok (private profiles)
+TIKTOK_COOKIES_FILE: str = os.getenv("TIKTOK_COOKIES_FILE", "")
+
+# Optional: path to Netscape cookies.txt for Instagram (private profiles)
+INSTAGRAM_COOKIES_FILE: str = os.getenv("INSTAGRAM_COOKIES_FILE", "")
