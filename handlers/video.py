@@ -245,6 +245,10 @@ async def on_music_callback(callback: CallbackQuery) -> None:
         return
 
     lang = await get_user_language(callback.from_user.id)
+    if callback.inline_message_id and not callback.message:
+        await callback.answer("Открой это в боте в личке для музыки", show_alert=True)
+        return
+
     await callback.answer(t("music_downloading", lang))
 
     audio_path = await downloader.download_audio(url)
@@ -292,6 +296,10 @@ async def on_comments_callback(callback: CallbackQuery) -> None:
         return
 
     lang = await get_user_language(callback.from_user.id)
+    if callback.inline_message_id and not callback.message:
+        await callback.answer("Открой это в боте в личке для комментариев", show_alert=True)
+        return
+
     await callback.answer(t("comments_loading", lang))
 
     comments = await downloader.extract_comments(url)
@@ -347,10 +355,17 @@ async def on_page_callback(callback: CallbackQuery) -> None:
     try:
         photo_url = info.photos[page]
         caption = _build_caption(info)
-        await callback.message.edit_media(
-            media=InputMediaPhoto(media=photo_url, caption=caption),
-            reply_markup=keyboard,
-        )
+        if callback.inline_message_id and not callback.message:
+            await callback.bot.edit_message_media(
+                inline_message_id=callback.inline_message_id,
+                media=InputMediaPhoto(media=photo_url, caption=caption),
+                reply_markup=keyboard,
+            )
+        else:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(media=photo_url, caption=caption),
+                reply_markup=keyboard,
+            )
         await callback.answer()
     except Exception:
         logger.exception("Slideshow navigation failed")
@@ -429,6 +444,8 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
 
     results = []
 
+    keyboard = _build_keyboard(url, info)
+
     if info.is_slideshow and info.photos:
         results.append(
             InlineQueryResultPhoto(
@@ -438,6 +455,7 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
                 title="Отправить фото",
                 description=f"TikTok фото-пост ({len(info.photos)} фото)",
                 caption=caption,
+                reply_markup=keyboard,
             ),
         )
     else:
@@ -453,6 +471,7 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
                     title=title[:128],
                     description="Готово к отправке",
                     caption=caption,
+                    reply_markup=keyboard,
                 ),
             )
         elif info.video_url:
@@ -465,6 +484,7 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
                     title=title[:128],
                     caption=caption,
                     description="Нажмите, чтобы отправить / Tap to send",
+                    reply_markup=keyboard,
                 ),
             )
 
