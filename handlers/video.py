@@ -14,6 +14,8 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
+    InlineQueryResultPhoto,
+    InlineQueryResultVideo,
     InputMediaPhoto,
     InputTextMessageContent,
     Message,
@@ -427,15 +429,15 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
 
     results = []
 
-    if info.is_slideshow:
+    if info.is_slideshow and info.photos:
         results.append(
-            InlineQueryResultArticle(
-                id="slideshow_inline_unavailable",
-                title="🖼️ Фото-пост открой через бота",
-                description="Inline Telegram не умеет нормально отправлять такие TikTok фото-посты",
-                input_message_content=InputTextMessageContent(
-                    message_text="🖼️ Этот TikTok фото-пост лучше открыть через бота в личке — там будут кнопки ◀️ ▶️ и переключение фото в одном сообщении.",
-                ),
+            InlineQueryResultPhoto(
+                id="photo_0",
+                photo_url=info.photos[0],
+                thumbnail_url=info.photos[0],
+                title="Отправить фото",
+                description=f"TikTok фото-пост ({len(info.photos)} фото)",
+                caption=caption,
             ),
         )
     else:
@@ -454,19 +456,15 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
                 ),
             )
         elif info.video_url:
-            description = (
-                "Нужен INLINE_CACHE_CHAT_ID в .env"
-                if not INLINE_CACHE_CHAT_ID
-                else "Не удалось прогреть Telegram-кеш для этого видео"
-            )
             results.append(
-                InlineQueryResultArticle(
-                    id="inline_prepare",
-                    title="⚠️ Inline временно недоступен",
-                    description=description,
-                    input_message_content=InputTextMessageContent(
-                        message_text="⚠️ Inline для этого видео сейчас недоступен. Отправь ссылку боту в личку.",
-                    ),
+                InlineQueryResultVideo(
+                    id="video_0",
+                    video_url=info.video_url,
+                    mime_type="video/mp4",
+                    thumbnail_url=thumb,
+                    title=title[:128],
+                    caption=caption,
+                    description="Нажмите, чтобы отправить / Tap to send",
                 ),
             )
 
