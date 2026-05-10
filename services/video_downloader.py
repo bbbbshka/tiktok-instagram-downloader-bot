@@ -1,21 +1,24 @@
 """Fast video/photo/audio downloader for TikTok & Instagram using yt-dlp.
 
 Speed optimisations:
- - Concurrent fragment downloads (CONCURRENT_FRAGMENTS env, default 8).
- - Prefer 720p mp4 — faster transfer than 1080p.
+ - Concurrent fragment downloads (CONCURRENT_FRAGMENTS env, default 16).
+ - Best quality mp4.
  - In-memory file-id cache so repeated links skip the download.
 
 Features:
  - Video download with stats (likes, views, comments count, author).
- - TikTok photo slideshow (carousel) → list of image URLs.
+ - TikTok photo slideshow (carousel) via gallery-dl fallback.
  - Audio extraction (music from TikTok).
  - Top comments extraction.
 """
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
+import re
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -25,6 +28,16 @@ import yt_dlp
 from config import MAX_VIDEO_SIZE, CONCURRENT_FRAGMENTS, CACHE_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
+
+
+def _to_int(val: object) -> int | None:
+    """Safely convert a value (str or int) to int, or None."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
 
 
 # ------------------------------------------------------------------
@@ -120,10 +133,9 @@ _COMMON_OPTS: dict = {
     },
 }
 
-_FAST_FORMAT = (
-    "best[ext=mp4][height<=720][filesize<50M]/"
-    "best[ext=mp4][height<=720][filesize_approx<50M]/"
-    "best[ext=mp4][height<=720]/"
+_BEST_FORMAT = (
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo+bestaudio/"
     "best[ext=mp4][filesize<50M]/"
     "best[ext=mp4]/"
     "best[filesize<50M]/"
@@ -143,12 +155,18 @@ class VideoDownloader:
     # ---------- extract info (no download) ----------
 
     async def extract_info(self, url: str) -> VideoInfo | None:
-        opts = {**_COMMON_OPTS, "skip_download": True, "format": _FAST_FORMAT}
+        normalized = self._normalize_tiktok_url(url)
+        opts = {**_COMMON_OPTS, "skip_download": True, "format": _BEST_FORMAT}
         try:
             info = await asyncio.get_event_loop().run_in_executor(
-                None, self._run_extract, opts, url,
+                None, self._run_extract, opts, normalized,
             )
-            return self._parse_info(info) if info else None
+            if info is None:
+                return None
+            vi = self._parse_info(info)
+            if self._is_tiktok_photo_url(url) and not vi.is_slideshow:
+                vi = await self._gallery_dl_photos(url, vi)
+            return vi
         except Exception:
             logger.exception("extract_info failed for %s", url)
             return None
@@ -156,22 +174,27 @@ class VideoDownloader:
     # ---------- download video ----------
 
     async def download(self, url: str) -> VideoInfo | None:
+        normalized = self._normalize_tiktok_url(url)
         tmp_dir = tempfile.mkdtemp(prefix="tgvid_")
         out_tpl = os.path.join(tmp_dir, "%(id)s.%(ext)s")
         opts = {
             **_COMMON_OPTS,
-            "format": _FAST_FORMAT,
+            "format": _BEST_FORMAT,
             "outtmpl": out_tpl,
             "merge_output_format": "mp4",
         }
         try:
             info = await asyncio.get_event_loop().run_in_executor(
-                None, self._run_download, opts, url,
+                None, self._run_download, opts, normalized,
             )
             if info is None:
                 return None
 
             vi = self._parse_info(info)
+
+            # TikTok photo post: use gallery-dl fallback
+            if self._is_tiktok_photo_url(url) and not vi.is_slideshow:
+                vi = await self._gallery_dl_photos(url, vi)
 
             # If it's a slideshow, no video file needed
             if vi.is_slideshow:
@@ -241,7 +264,7 @@ class VideoDownloader:
             **_COMMON_OPTS,
             "skip_download": True,
             "getcomments": True,
-            "format": _FAST_FORMAT,
+            "format": _BEST_FORMAT,
         }
         try:
             info = await asyncio.get_event_loop().run_in_executor(
@@ -266,6 +289,71 @@ class VideoDownloader:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    _TIKTOK_PHOTO_RE = re.compile(
+        r"https?://(?:www\.)?tiktok\.com/@[^/]+/photo/\d+",
+    )
+
+    @staticmethod
+    def _is_tiktok_photo_url(url: str) -> bool:
+        return "/photo/" in url and "tiktok.com" in url
+
+    @staticmethod
+    def _normalize_tiktok_url(url: str) -> str:
+        """Convert /photo/ TikTok URLs to /video/ so yt-dlp can handle them."""
+        if "tiktok.com" in url and "/photo/" in url:
+            return url.replace("/photo/", "/video/")
+        return url
+
+    async def _gallery_dl_photos(self, url: str, base_info: VideoInfo) -> VideoInfo:
+        """Use gallery-dl to extract photo URLs from TikTok photo posts."""
+        try:
+            proc = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["gallery-dl", "--dump-json", url],
+                    capture_output=True, text=True, timeout=60,
+                ),
+            )
+            if proc.returncode != 0:
+                logger.warning("gallery-dl failed for %s: %s", url, proc.stderr[:500])
+                return base_info
+
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return base_info
+
+            if not isinstance(data, list):
+                return base_info
+
+            photos: list[str] = []
+            for item in data:
+                if not isinstance(item, list) or len(item) < 3:
+                    continue
+                file_url = item[1] if isinstance(item[1], str) else None
+                meta = item[2] if isinstance(item[2], dict) else {}
+                ext = meta.get("extension", "")
+                if file_url and ext in ("jpg", "jpeg", "png", "webp"):
+                    photos.append(file_url)
+
+            if photos:
+                base_info.is_slideshow = True
+                base_info.photos = photos
+                for item in data:
+                    if not isinstance(item, list) or len(item) < 3:
+                        continue
+                    meta = item[2] if isinstance(item[2], dict) else {}
+                    s = meta.get("stats")
+                    if isinstance(s, dict) and "diggCount" in s:
+                        base_info.like_count = _to_int(s.get("diggCount"))
+                        base_info.view_count = _to_int(s.get("playCount"))
+                        base_info.comment_count = _to_int(s.get("commentCount"))
+                        break
+            return base_info
+        except Exception:
+            logger.exception("gallery-dl fallback failed for %s", url)
+            return base_info
 
     @staticmethod
     def _run_extract(opts: dict, url: str) -> dict | None:

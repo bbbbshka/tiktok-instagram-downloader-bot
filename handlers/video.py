@@ -77,23 +77,8 @@ def _fmt_count(n: int | None) -> str:
     return str(n)
 
 
-def _build_caption(info: VideoInfo) -> str:
-    parts: list[str] = []
-    if info.author:
-        parts.append(f"@{info.author}")
-    if info.title:
-        parts.append(info.title)
-    stats: list[str] = []
-    if info.like_count is not None:
-        stats.append(f"❤️ {_fmt_count(info.like_count)}")
-    if info.view_count is not None:
-        stats.append(f"👁 {_fmt_count(info.view_count)}")
-    if info.comment_count is not None:
-        stats.append(f"💬 {_fmt_count(info.comment_count)}")
-    if stats:
-        parts.append("  ".join(stats))
-    caption = "\n".join(parts)
-    return caption[:1024]
+def _build_caption(info: VideoInfo) -> str | None:
+    return None
 
 
 def _build_keyboard(url: str, info: VideoInfo, page: int = 0) -> InlineKeyboardMarkup:
@@ -118,7 +103,6 @@ def _build_keyboard(url: str, info: VideoInfo, page: int = 0) -> InlineKeyboardM
 
     # Action row
     row3: list[InlineKeyboardButton] = []
-    row3.append(InlineKeyboardButton(text="🔗 Ссылка", url=url))
     row3.append(InlineKeyboardButton(text="🎵 Музыка", callback_data=f"music:{url_hash}"))
 
     rows = []
@@ -400,7 +384,7 @@ async def on_inline_query(inline_query: InlineQuery) -> None:
         return
 
     thumb = info.thumbnail_url or PLACEHOLDER_THUMB
-    title = info.title or "Video"
+    title = "Отправить видео"
     caption = _build_caption(info)
 
     results = []
