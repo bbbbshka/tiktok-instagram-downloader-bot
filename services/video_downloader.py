@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -331,7 +332,7 @@ class VideoDownloader:
             proc = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    ["gallery-dl", "--dump-json", url],
+                    [sys.executable, "-m", "gallery_dl", "--dump-json", url],
                     capture_output=True, text=True, timeout=60,
                 ),
             )
